@@ -1,0 +1,5 @@
+._*
+wandb
+.venv
+checkpoints
+__pycache__
