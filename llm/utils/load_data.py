@@ -4,62 +4,72 @@ from torch.utils.data import DataLoader
 from tokenizers import Tokenizer
 from tokenizers.models import BPE
 from tokenizers.trainers import BpeTrainer
-from tokenizers.pre_tokenizers import Whitespace
+from tokenizers.pre_tokenizers import ByteLevel
+from tokenizers.decoders import ByteLevel as ByteLevelDecoder
 import torch
 
 
-def create_tokenizer(train_ds):
+def create_tokenizer(path):
     tokenizer = Tokenizer(BPE(unk_token="[UNK]"))
     trainer = BpeTrainer(special_tokens=["[PAD]", "[CLS]", "[SEP]", "[UNK]", "[MASK]"])
-    tokenizer.pre_tokenizer = Whitespace()
-    tokenizer.train_from_iterator(train_ds["Text"], trainer)
-
+    tokenizer.pre_tokenizer = ByteLevel()
+    tokenizer.decoder = ByteLevelDecoder()
+    tokenizer.train([path], trainer)
     return tokenizer
 
 
-def get_dataloaders(dataset_path, max_len, batch_size):
-    df = pd.read_csv(f"{dataset_path}/train.csv")
-    train_ds = Dataset.from_pandas(df)
+def get_dataloaders(dataset_path, batch_size, seq_len=8):
+    with open(f"{dataset_path}/train.csv") as f:
+        lines = f.readlines()[1:]
+        train_corpus = "\n".join(lines)
 
-    df = pd.read_csv(f"{dataset_path}/test.csv")
-    test_ds = Dataset.from_pandas(df)
+    with open(f"{dataset_path}/test.csv") as f:
+        lines = f.readlines()[1:]
+        test_corpus = "\n".join(lines)
 
-    tokenizer = create_tokenizer(train_ds)
-    tokenizer.enable_truncation(max_length=max_len)
+    tokenizer = create_tokenizer(f"{dataset_path}/train.csv")
 
-    def collate_fn(batch):
+    train_tokens = tokenizer.encode(train_corpus)
+    test_tokens = tokenizer.encode(test_corpus)
+
+    train_idxs = torch.arange(0, len(train_tokens) - seq_len - 1, seq_len).long()
+    test_idxs = torch.arange(0, len(test_tokens) - seq_len - 1, seq_len).long()
+
+    def collate_fn_train(batch):
         input_ids = []
-        attention_masks = []
         labels = []
 
-        tokens = tokenizer.encode_batch([example['Text'] for example in batch])
-
-        pad_id = tokenizer.token_to_id("[PAD]")
-        max_len = max(len(token.ids) for token in tokens) - 1
-        for token in tokens:
-            ids = token.ids[:-1]
-            lbl = token.ids[1:]
-
-            pad_len = max_len - len(ids)
-
-            input_ids.append(ids + [pad_id] * pad_len)
-            attention_masks.append([1] * len(ids) + [0] * pad_len)
-            labels.append(lbl + [-100] * pad_len)
+        for idx in batch:
+            input_ids.append(train_tokens.ids[idx:idx+seq_len])
+            labels.append(train_tokens.ids[idx+1:idx+seq_len+1])
 
         return {
             'input_ids': torch.tensor(input_ids, dtype=torch.long),
-            'attention_mask': torch.tensor(attention_masks, dtype=torch.long),
+            'labels': torch.tensor(labels, dtype=torch.long),
+        }
+    
+    def collate_fn_test(batch):
+        input_ids = []
+        labels = []
+
+        for idx in batch:
+            input_ids.append(test_tokens.ids[idx:idx+seq_len])
+            labels.append(test_tokens.ids[idx+1:idx+seq_len+1])
+
+        return {
+            'input_ids': torch.tensor(input_ids, dtype=torch.long),
             'labels': torch.tensor(labels, dtype=torch.long),
         }
     
 
-    train_loader = torch.utils.data.DataLoader(train_ds, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
-    test_loader = torch.utils.data.DataLoader(test_ds, batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
-    return (train_loader, test_loader), tokenizer
+    train_dl = DataLoader(train_idxs, batch_size=batch_size, shuffle=True, collate_fn=collate_fn_train)
+    test_dl = DataLoader(test_idxs, batch_size=batch_size, shuffle=False, collate_fn=collate_fn_test)
+
+    return (train_dl, test_dl), tokenizer
 
 
 if __name__=="__main__":
-    (train_dl, test_dl), tokenizer = get_dataloaders('./data', 256, 8)
+    (train_dl, test_dl), tokenizer = get_dataloaders("./data", 8)
 
-    x = next(iter(train_dl))
-    print(x)
+    print(next(iter(train_dl)))
+    
